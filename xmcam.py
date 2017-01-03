@@ -15,12 +15,14 @@ class XMCam:
     port = 0
     username = password = ''
 
-    def __init__(self, ip, port, username, password):
+    def __init__(self, ip, port, username, password, autoconnect=True):
         self.ip = ip
         self.port = port
         self.username = username
         self.password = password
-        self.connect()
+
+        if autoconnect:
+            self.connect()
 
     def __del__(self):
         self.disconnect()
@@ -261,7 +263,8 @@ class XMCam:
 
     # Just because no snap command supported, we need external program to capture from RTSP stream
     # using avconv or ffmpeg
-    def cmd_external_avconv_snap(self, file, app='/usr/bin/avconv',
+    @staticmethod
+    def cmd_external_avconv_snap(snap_file, app='/usr/bin/avconv',
                                  rtsp='rtsp://192.168.1.10/user=admin&password=admin&channel=1&stream=0.sdp',
                                  args=('-y', '-f', 'image2', '-vframes', '1', '-pix_fmt', 'yuvj420p')):
 
@@ -281,7 +284,7 @@ class XMCam:
         [fullargs.append(a) for a in args]
 
         # Lastly, append output arg
-        fullargs.append(file)
+        fullargs.append(snap_file)
 
         # child = subprocess.Popen(process, stdout=subprocess.PIPE)
         child = subprocess.Popen(fullargs)
@@ -289,6 +292,7 @@ class XMCam:
 
         return child.returncode == 0 # True if 0
 
-    def cmd_snap(self, file):
-        retval = self.cmd_external_avconv_snap(file)
+    @staticmethod
+    def cmd_snap(snap_file):
+        retval = XMCam.cmd_external_avconv_snap(snap_file)
         return retval
