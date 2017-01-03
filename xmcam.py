@@ -1,10 +1,7 @@
-import socket
 import xmconst
-import json
-import os
+import json, os, subprocess, socket
 from struct import pack, unpack
 from pprint import pprint, pformat
-
 
 class XMCam:
     socket = None
@@ -264,17 +261,19 @@ class XMCam:
     # Just because no snap command supported, we need external program to capture from RTSP stream
     # using avconv or ffmpeg
     @staticmethod
-    def cmd_external_avconv_snap(snap_file, app='/usr/bin/avconv',
-                                 rtsp='rtsp://192.168.1.10/user=admin&password=admin&channel=1&stream=0.sdp',
-                                 args=('-y', '-f', 'image2', '-vframes', '1', '-pix_fmt', 'yuvj420p')):
+    def cmd_external_snap(snap_file, app='/usr/bin/avconv',
+                          rtsp='rtsp://192.168.1.10/user=admin&password=admin&channel=1&stream=0.sdp',
+                          args=('-y', '-f', 'image2', '-vframes', '1', '-pix_fmt', 'yuvj420p')):
 
         if not os.path.exists(app):
             return False
 
-        import subprocess
-
         # Add executable
         fullargs = [app]
+
+        # Make silent except errors
+        fullargs.append('-loglevel')
+        fullargs.append('panic')
 
         # Append input arg
         fullargs.append('-i')
@@ -293,6 +292,42 @@ class XMCam:
         return child.returncode == 0 # True if 0
 
     @staticmethod
+    def cmd_external_record(video_file, app='/usr/bin/avconv',
+                            rtsp='rtsp://192.168.1.10/user=admin&password=admin&channel=1&stream=0.sdp',
+                            args=('-vcodec', 'copy', '-f', 'mp4', '-y', '-an'),
+                            time_limit=5
+                            ):
+        if not os.path.exists(app):
+            return False
+
+        # Add executable
+        fullargs = [app]
+
+        # Make silent except errors
+        fullargs.append('-loglevel')
+        fullargs.append('panic')
+
+        # Append input arg
+        fullargs.append('-i')
+        fullargs.append(rtsp)
+
+        # Append other args
+        [fullargs.append(a) for a in args]
+
+        # Append record time limit in secs
+        fullargs.append('-t')
+        fullargs.append(str(time_limit) if time_limit > 0 else '5')
+
+        # Lastly, append output arg
+        fullargs.append(video_file)
+
+        # child = subprocess.Popen(process, stdout=subprocess.PIPE)
+        child = subprocess.Popen(fullargs)
+        child.communicate()
+
+        return child.returncode == 0 # True if 0
+
+    @staticmethod
     def cmd_snap(snap_file):
-        retval = XMCam.cmd_external_avconv_snap(snap_file)
+        retval = XMCam.cmd_external_snap(snap_file)
         return retval
