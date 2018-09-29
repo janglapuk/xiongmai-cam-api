@@ -1,88 +1,124 @@
+import sys, time
 import xmconst
 import json, os, subprocess, socket
 from struct import pack, unpack
 from pprint import pprint, pformat
 
+if sys.version_info[0] == 2:
+    from threading import _Timer as Timer
+else:
+    from threading import Timer
+
+class RepeatingTimer(Timer):
+    def run(self):
+        while not self.finished.is_set():
+            self.function(*self.args, **self.kwargs)
+            self.finished.wait(self.interval)
+
 class XMCam:
-    socket = None
+    instance = None
+    main_socket = None
+    socket_timeout = 20
     sid = 0
     sequence = 0
-
     ip = ''
     port = 0
     username = password = ''
+    keepalive_timer = None
 
-    def __init__(self, ip, port, username, password, autoconnect=True):
+    def __init__(self, ip, port, username, password, sid=0, autoconnect=True, instance=None):
         self.ip = ip
         self.port = port
         self.username = username
         self.password = password
+        self.sid = sid
+        self.instance = instance
 
         if autoconnect:
             self.connect()
 
     def __del__(self):
-        self.disconnect()
+        try:
+            self.disconnect()
+        except:
+            pass
 
-    def prettify(self, json_data):
+    def is_sub_connection(self):
+        return self.instance != None
+        
+    def connect(self):
+        try:
+            self.main_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.main_socket.settimeout(self.socket_timeout)
+            self.main_socket.connect((self.ip, self.port))
+        except Exception as e:
+            print(e)
+            return False
+        return True
+
+    def disconnect(self):
+        try:
+            self.main_socket.close()
+            self._stop_keepalive_interval()
+        except:
+            pass
+
+    @staticmethod
+    def prettify(json_data):
         data_dict = json.loads(json_data)
         return pformat(data_dict)
 
-    def unpack_data(self, data, is_bytearray=True):
-        if is_bytearray:
-            parsed = list(bytearray(data.encode('ascii')))
-        else:
-            parsed = [c.encode('hex') for c in data]
-        return parsed
+    @staticmethod
+    def to_dict(json_data):
+        data_dict = json.loads(json_data)
+        return data_dict
 
-    def prepare_generic_command_head(self, msgid, params):
+    def _generic_command_head(self, msgid, params):
         pkt = params
 
-        if msgid != xmconst.LOGIN_REQ2:
-            params['SessionID'] = self.build_packet_sid()
+        if msgid != xmconst.LOGIN_REQ2 and type(params) != bytes:
+            pkt['SessionID'] = self._build_packet_sid()
 
-        cmd_data = self.build_packet(msgid, pkt)
+        cmd_data = self._build_packet(msgid, pkt)
+        self.main_socket.send(cmd_data)
 
-        self.socket.send(cmd_data)
+        if type(params) == bytes:
+            return cmd_data    
 
-        reply_head = self.get_reply_head()
+        response_head = self._get_response_head()
+        return response_head
+        
+    def _generic_command(self, msgid, params):
+        response_head = self._generic_command_head(msgid, params)
+        out = self._get_response_data(response_head)
 
-        return reply_head
-
-    def prepare_generic_command(self, msgid, params):
-        reply_head = self.prepare_generic_command_head(msgid, params)
-
-        out = self.get_reply_data(reply_head)
-
-        if msgid == xmconst.LOGIN_REQ2 and 'SessionID' in reply_head:
-            #self.sid = int(reply_head['SessionID'], 16)
-            self.sid = reply_head['SessionID']
+        if msgid == xmconst.LOGIN_REQ2 and 'SessionID' in response_head:
+            self.sid = response_head['SessionID']
 
         if out:
-            return json.dumps(out)
+            return out
 
         return None
 
-    def prepare_generic_command_download(self, msgid, params, file):
-        reply_head = self.prepare_generic_command_head(msgid, params)
-        out = self.get_reply_data(reply_head)
+    def _generic_command_download(self, msgid, params, file):
+        reply_head = self._generic_command_head(msgid, params)
+        out = self._get_response_data(reply_head)
 
         if out:
             with open(file, 'wb') as f:
                 f.write(out)
-
             return True
 
         return False
 
-    def get_reply_head(self):
-        data = self.socket.recv(4)
+    def _get_response_head(self):
+        data = self.main_socket.recv(4)
         head_flag, version, _, _ = unpack('BBBB', data)
 
-        data = self.socket.recv(8)
+        data = self.main_socket.recv(8)
         sid, seq = unpack('ii', data)
 
-        data = self.socket.recv(8)
+        data = self.main_socket.recv(8)
         channel, endflag, msgid, size = unpack('BBHI', data)
 
         reply_head = {
@@ -97,53 +133,58 @@ class XMCam:
 
         return reply_head
 
-    def get_reply_data(self, reply_head):
+    def _get_response_data(self, reply_head):
         reply = reply_head
         length = reply['Content_Length']
         out = ''
 
         for i in range(0, length):
-            data = self.socket.recv(1)
-            out += data
+            data = self.main_socket.recv(1)
+            out += data.decode('utf-8')
 
-        return out
+        return out.rstrip('\x00')
 
-    def build_packet_sid(self):
+    def _build_packet_sid(self):
         return '0x%08x' % self.sid
 
-    def build_packet(self, type, params):
-        pkt_type = type
+    def _build_packet(self, ptype, data):
+        pkt_type = ptype
         pkt_prefix_1 = (0xff, 0x01, 0x00, 0x00)
         pkt_prefix_2 = (0x00, 0x00, 0x00, 0x00)
-
-        '''
-        my $msgid = pack('s', 0) . pack('s', $pkt_type);
-        my $pkt_prefix_data =  pack('c*', @pkt_prefix_1) . pack('i', $self->{sid}) . pack('c*', @pkt_prefix_2). $msgid;
-        '''
 
         header = pack('B'*len(pkt_prefix_1), *pkt_prefix_1)
         header += pack('I', self.sid)
         header += pack('B'*len(pkt_prefix_2), *pkt_prefix_2)
         header += pack('H', 0) + pack('H', pkt_type)
 
-        pkt_params_data = json.dumps(params) #+ '\n'
-        pkt_data = header + pack('I', len(pkt_params_data)) + bytes(pkt_params_data.encode('ascii'))
+        # If data is bytes, designed for sending stream bytes to server
+        if type(data) == bytes:
+            pkt_data = data
+            pkt_data = header + pack('I', len(pkt_data)) + pkt_data
+        else:
+            pkt_data = json.dumps(data)
+            pkt_data = header + pack('I', len(pkt_data)) + bytes(pkt_data.encode('ascii'))
 
-        #print(':'.join(x.encode('hex') for x in pkt_data))
         return pkt_data
 
-    def connect(self):
-        try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.connect((self.ip, self.port))
-        except Exception as e:
-            print(e)
-            return False
+    def _start_keepalive_interval(self):
+        self.keepalive_timer = RepeatingTimer(20.0, self._interval_keepalive)
+        self.keepalive_timer.start()
 
-        return True
+    def _stop_keepalive_interval(self):
+        if self.keepalive_timer != None:
+            self.keepalive_timer.cancel()
 
-    def disconnect(self):
-        self.socket.close()
+    def _interval_keepalive(self):
+        pkt = { 
+            "Name" : "KeepAlive" 
+        }
+        response = self._generic_command(xmconst.KEEPALIVE_REQ, pkt)
+        print(response)
+
+    def create_sub_connection(self, autoconnect=False):
+        subconn = XMCam(self.ip, self.port, self.username, self.password, sid=self.sid, instance=self, autoconnect=autoconnect)
+        return subconn
 
     def cmd_login(self):
         pkt = {
@@ -153,65 +194,94 @@ class XMCam:
             'UserName': self.username
         }
 
-        reply_json = self.prepare_generic_command(xmconst.LOGIN_REQ2, pkt)
+        response = self._generic_command(xmconst.LOGIN_REQ2, pkt)
+        respdict = self.to_dict(response)
 
-        return self.prettify(reply_json)
+        if not self.is_sub_connection() and respdict != None and 'Ret' in respdict and respdict['Ret'] == 100:
+            self._start_keepalive_interval()
+        else:
+            print(__name__, 'Cannot start keepalive')
+
+        return response
 
     def cmd_system_function(self):
         pkt = {
             'Name': 'SystemFunction'
         }
 
-        reply_json = self.prepare_generic_command(xmconst.ABILITY_GET, pkt)
-        return self.prettify(reply_json)
+        response = self._generic_command(xmconst.ABILITY_GET, pkt)
+        return self.prettify(response)
 
     def cmd_system_info(self):
         pkt = {
             'Name': 'SystemInfo'
         }
 
-        reply_json = self.prepare_generic_command(xmconst.SYSINFO_REQ, pkt)
-        return self.prettify(reply_json)
+        response = self._generic_command(xmconst.SYSINFO_REQ, pkt)
+        return self.prettify(response)
 
     def cmd_keep_alive(self):
         pkt = {
             'Name': 'KeepAlive'
         }
 
-        return self.prepare_generic_command(xmconst.KEEPALIVE_REQ, pkt)
+        return self._generic_command(xmconst.KEEPALIVE_REQ, pkt)
 
     def cmd_channel_title(self):
         pkt = {
             'Name': 'ChannelTitle'
         }
 
-        reply_json = self.prepare_generic_command(xmconst.CONFIG_CHANNELTILE_GET, pkt)
-        return self.prettify(reply_json)
+        response = self._generic_command(xmconst.CONFIG_CHANNELTILE_GET, pkt)
+        return self.prettify(response)
 
     def cmd_OEM_info(self):
         pkt = {
             'Name': 'OEMInfo'
         }
 
-        reply_json = self.prepare_generic_command(xmconst.SYSINFO_REQ, pkt)
-        return self.prettify(reply_json)
+        response = self._generic_command(xmconst.SYSINFO_REQ, pkt)
+        return self.prettify(response)
 
     def cmd_storage_info(self):
         pkt = {
             'Name': 'StorageInfo'
         }
 
-        reply_json = self.prepare_generic_command(xmconst.SYSINFO_REQ, pkt)
-        return self.prettify(reply_json)
+        response = self._generic_command(xmconst.SYSINFO_REQ, pkt)
+        return self.prettify(response)
 
+    def cmd_sync_time(self, noRTC = False):
+        cmd = 'OPTimeSetting'
+        pkt_type = xmconst.SYSMANAGER_REQ
+
+        if noRTC:
+            cmd += 'NoRTC'
+            pkt_type = xmconst.SYNC_TIME_REQ
+
+        pkt = {
+            'Name': cmd,
+            cmd: time.strftime('%Y-%m-%d %H:%M:%S')
+        }
+
+        response = self._generic_command(pkt_type, pkt)
+        return response
+
+    def cmd_get_time(self):
+        pkt = {
+            'Name': 'OPTimeQuery'
+        }
+
+        response = self._generic_command(xmconst.TIMEQUERY_REQ, pkt)
+        return response
 
     def cmd_users(self):
         pkt = {
 
         }
 
-        reply_json = self.prepare_generic_command(xmconst.USERS_GET, pkt)
-        return self.prettify(reply_json)
+        response = self._generic_command(xmconst.USERS_GET, pkt)
+        return self.prettify(response)
 
     def cmd_ptz_control(self, direction, stop=False):
         pkt = {
@@ -239,15 +309,15 @@ class XMCam:
             }
         }
 
-        reply_json = self.prepare_generic_command(xmconst.PTZ_REQ, pkt)
-        return self.prettify(reply_json)
+        response = self._generic_command(xmconst.PTZ_REQ, pkt)
+        return self.prettify(response)
 
     def cmd_photo(self, file):
         pkt = {
 
         }
 
-        reply = self.prepare_generic_command_download(xmconst.PHOTO_GET_REQ, pkt, file)
+        reply = self._generic_command_download(xmconst.PHOTO_GET_REQ, pkt, file)
         return reply
 
     def cmd_config_export(self, file):
@@ -255,7 +325,7 @@ class XMCam:
             'Name': ''
         }
 
-        reply = self.prepare_generic_command_download(xmconst.CONFIG_EXPORT_REQ, pkt, file)
+        reply = self._generic_command_download(xmconst.CONFIG_EXPORT_REQ, pkt, file)
         return reply
 
     # Just because no snap command supported, we need external program to capture from RTSP stream
@@ -318,7 +388,7 @@ class XMCam:
         fullargs.append('-t')
         fullargs.append(str(time_limit) if time_limit > 0 else '5')
 
-        # Lastly, append output arg
+        # Append output arg
         fullargs.append(video_file)
 
         # child = subprocess.Popen(process, stdout=subprocess.PIPE)
@@ -331,3 +401,112 @@ class XMCam:
     def cmd_snap(snap_file):
         retval = XMCam.cmd_external_snap(snap_file)
         return retval
+
+    def cmd_talk_claim(self):
+        assert self.is_sub_connection(), 'cmd_talk_claim need run on a sub connection'
+
+        pkt = { 
+            "Name": "OPTalk", 
+            "OPTalk": { 
+                "Action": "Claim", 
+                "AudioFormat": { 
+                    "BitRate": 0, 
+                    "EncodeType": "G711_ALAW", 
+                    "SampleBit": 8, 
+                    "SampleRate": 8 
+                } 
+            }
+        }
+
+        response = self._generic_command(xmconst.TALK_CLAIM, pkt)
+        return response
+
+    def cmd_talk_send_stream(self, data):
+        #assert type(data) == bytes, 'Data should be a PCM bytes type'
+        # final_data = bytes.fromhex('000001fa0e024001') + data
+        final_data = b'\x00\x00\x01\xfa\x0e\x02\x40\x01' + data
+        sent = self._generic_command_head(xmconst.TALK_CU_PU_DATA, final_data)
+        return sent
+
+    def cmd_talk_start(self):
+        pkt = { 
+            "Name" : "OPTalk", 
+            "OPTalk" : { 
+                "Action" : "Start", 
+                "AudioFormat" : { 
+                    "BitRate" : 128, 
+                    "EncodeType" : "G711_ALAW", 
+                    "SampleBit" : 8, 
+                    "SampleRate" : 8000 
+                }
+            }
+        }
+
+        response = self._generic_command(xmconst.TALK_REQ, pkt)
+        return response
+
+    def cmd_talk_stop(self):
+        pkt = { 
+            "Name" : "OPTalk", 
+            "OPTalk" : { 
+                "Action" : "Stop", 
+                "AudioFormat" : { 
+                    "BitRate" : 128, 
+                    "EncodeType" : "G711_ALAW", 
+                    "SampleBit" : 8, 
+                    "SampleRate" : 8000 
+                }
+            }
+        }
+
+        response = self._generic_command(xmconst.TALK_REQ, pkt)
+        return response
+
+    @staticmethod
+    def talk_convert_to_pcm(src,
+        volume=1.0, 
+        app='/usr/bin/avconv', 
+        args=(
+            '-y', 
+            '-f', 'alaw',
+            '-ar', '8000',
+            '-ac', '1',
+            )):
+
+        if not os.path.exists(app):
+            return (False, None)
+
+        if not os.path.exists(src):
+            return (False, None)
+        
+        dst_final = src + '.pcm'
+
+        fullargs = [app]
+        fullargs.append('-loglevel')
+        fullargs.append('panic')
+        fullargs.append('-i')
+        fullargs.append(src)
+        [fullargs.append(a) for a in args]
+
+        if volume != 1.0:
+            fullargs.append('-filter:a')
+            fullargs.append('volume={}'.format(volume))
+
+        fullargs.append(dst_final)
+
+        child = subprocess.Popen(fullargs)
+        child.communicate()
+
+        return (child.returncode == 0, dst_final) # True if 0
+
+    @staticmethod
+    def talk_get_chunks(pcmfile):
+        retdata = None
+        try:
+            pcmdata = open(pcmfile, 'rb').read()
+            data = [pcmdata[i:i+320] for i in range(0, len(pcmdata), 320)]
+            retdata = data
+        except:
+            print('Got an exception on talk_get_chunks')
+
+        return retdata
