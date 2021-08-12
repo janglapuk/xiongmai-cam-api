@@ -331,7 +331,7 @@ class XMCam:
     # Just because no snap command supported, we need external program to capture from RTSP stream
     # using avconv or ffmpeg
     @staticmethod
-    def cmd_external_snap(snap_file, app='/usr/bin/avconv',
+    def cmd_external_snap(snap_file, app='/usr/bin/ffmpeg',
                           rtsp='rtsp://192.168.1.10/user=admin&password=admin&channel=1&stream=0.sdp',
                           args=('-y', '-f', 'image2', '-vframes', '1', '-pix_fmt', 'yuvj420p')):
 
@@ -362,7 +362,7 @@ class XMCam:
         return child.returncode == 0 # True if 0
 
     @staticmethod
-    def cmd_external_record(video_file, app='/usr/bin/avconv',
+    def cmd_external_record(video_file, app='/usr/bin/ffmpeg',
                             rtsp='rtsp://192.168.1.10/user=admin&password=admin&channel=1&stream=0.sdp',
                             args=('-vcodec', 'copy', '-f', 'mp4', '-y', '-an'),
                             time_limit=5
@@ -465,7 +465,7 @@ class XMCam:
     @staticmethod
     def talk_convert_to_pcm(src,
         volume=1.0, 
-        app='/usr/bin/avconv', 
+        app='/usr/bin/ffmpeg', 
         args=(
             '-y', 
             '-f', 'alaw',
