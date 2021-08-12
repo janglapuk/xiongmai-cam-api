@@ -190,7 +190,7 @@ class XMCam:
         pkt = {
             'EncryptType': 'MD5',
             'LoginType': 'DVRIP-Web',
-            'PassWord': self.password,
+            'PassWord': self.sofia_hash(self.password),
             'UserName': self.username
         }
 
